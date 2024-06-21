@@ -29,8 +29,8 @@ var gamesMutex sync.Mutex
 
 func main() {
 	http.HandleFunc("/ws", handleConnections)
-	log.Println("Server started on :5000")
-	log.Fatal(http.ListenAndServe(":5000", nil))
+	log.Println("Server started on :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
