@@ -2,8 +2,10 @@ package main
 
 import (
 	"log"
+	"math/rand"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/notnil/chess"
@@ -18,16 +20,22 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+type Player struct {
+	Conn  *websocket.Conn
+	Color chess.Color
+}
+
 type Game struct {
 	sync.Mutex
 	Game    *chess.Game
-	Players []*websocket.Conn
+	Players []*Player
 }
 
 var games = make(map[string]*Game)
 var gamesMutex sync.Mutex
 
 func main() {
+	rand.New(rand.NewSource(time.Now().UnixNano()))
 	http.HandleFunc("/ws", handleConnections)
 	log.Println("Server started on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -43,6 +51,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		log.Println("Connection closed from", r.RemoteAddr)
+		removePlayer(ws)
 		err := ws.Close()
 		if err != nil {
 			return
@@ -66,13 +75,18 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		switch action {
 		case "create":
 			gameID := ksuid.New().String()
-			gamesMutex.Lock()
-			games[gameID] = &Game{
-				Game:    chess.NewGame(),
-				Players: []*websocket.Conn{ws},
+			playerColor := randomColor()
+			player := &Player{Conn: ws, Color: playerColor}
+			game := &Game{
+				Game: chess.NewGame(),
+				Players: []*Player{
+					player,
+				},
 			}
+			gamesMutex.Lock()
+			games[gameID] = game
 			gamesMutex.Unlock()
-			err := ws.WriteJSON(map[string]string{"status": "created", "gameID": gameID})
+			err := ws.WriteJSON(map[string]string{"status": "created", "gameID": gameID, "color": playerColor.String()})
 			if err != nil {
 				return
 			}
@@ -82,9 +96,20 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			gamesMutex.Lock()
 			game, exists := games[gameID]
 			if exists {
-				game.Players = append(game.Players, ws)
+				if len(game.Players) >= 2 {
+					gamesMutex.Unlock()
+					err := ws.WriteJSON(map[string]string{"error": "game full"})
+					if err != nil {
+						return
+					}
+					log.Printf("Attempt to join full game with ID: %s", gameID)
+					continue
+				}
+				playerColor := toggleColor(game.Players[0].Color)
+				player := &Player{Conn: ws, Color: playerColor}
+				game.Players = append(game.Players, player)
 				gamesMutex.Unlock()
-				err := ws.WriteJSON(map[string]string{"status": "joined", "gameID": gameID})
+				err := ws.WriteJSON(map[string]string{"status": "joined", "gameID": gameID, "color": playerColor.String()})
 				if err != nil {
 					return
 				}
@@ -106,6 +131,16 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			gamesMutex.Lock()
 			game, exists := games[gameID]
 			if exists {
+				if game.Game.Position().Turn() != getPlayerColor(ws, game) {
+					err := ws.WriteJSON(map[string]string{"error": "not your turn"})
+					if err != nil {
+						return
+					}
+					gamesMutex.Unlock()
+					log.Printf("Invalid move attempt: not player's turn in game %s", gameID)
+					continue
+				}
+
 				err := game.Game.MoveStr(moveStr)
 				if err != nil {
 					err := ws.WriteJSON(map[string]string{"error": err.Error()})
@@ -155,11 +190,55 @@ func broadcastGameState(gameID string) {
 	}
 
 	for _, player := range game.Players {
-		err := player.WriteJSON(state)
+		err := player.Conn.WriteJSON(state)
 		if err != nil {
 			log.Println("Write error:", err)
 		}
 	}
 
 	log.Printf("Game state broadcast for game ID %s: %s", gameID, status)
+}
+
+func removePlayer(ws *websocket.Conn) {
+	gamesMutex.Lock()
+	defer gamesMutex.Unlock()
+
+	for gameID, game := range games {
+		game.Lock()
+		for i, player := range game.Players {
+			if player.Conn == ws {
+				game.Players = append(game.Players[:i], game.Players[i+1:]...)
+				log.Printf("Player removed from game ID %s", gameID)
+				break
+			}
+		}
+		if len(game.Players) == 0 {
+			delete(games, gameID)
+			log.Printf("Game ID %s deleted", gameID)
+		}
+		game.Unlock()
+	}
+}
+
+func randomColor() chess.Color {
+	if rand.Intn(2) == 0 {
+		return chess.White
+	}
+	return chess.Black
+}
+
+func toggleColor(color chess.Color) chess.Color {
+	if color == chess.White {
+		return chess.Black
+	}
+	return chess.White
+}
+
+func getPlayerColor(ws *websocket.Conn, game *Game) chess.Color {
+	for _, player := range game.Players {
+		if player.Conn == ws {
+			return player.Color
+		}
+	}
+	return chess.NoColor
 }
