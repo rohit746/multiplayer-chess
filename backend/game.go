@@ -7,7 +7,7 @@ import (
 )
 
 type Game struct {
-	sync.Mutex
 	Game    *chess.Game
 	Players []*Player
+	sync.Mutex
 }
